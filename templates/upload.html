@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Tree Sense Pathfinding</title>
+    <style>
+        body { font-family: Arial, Helvetica, sans-serif; margin: 3rem auto; max-width: 42rem; line-height: 1.6; }
+        h1 { color: #0b3d62; }
+        form { border: 1px solid #d0d0d0; padding: 1.5rem; border-radius: 8px; background: #f9fbfd; }
+        input[type="file"] { margin: 1rem 0; }
+        button { background: #0b84f3; color: #fff; border: none; padding: 0.75rem 1.25rem; border-radius: 6px; cursor: pointer; }
+        button:hover { background: #095db4; }
+        footer { margin-top: 3rem; font-size: 0.85rem; color: #555; }
+    </style>
+</head>
+<body>
+    <h1>Tree Sense Pathfinding</h1>
+    <p>Upload a PNG or JPG image to begin planning a path. Once uploaded you can select start, goal, waypoints, and manual obstacles before running A* search.</p>
+    <form action="/upload" method="post" enctype="multipart/form-data">
+        <label for="file">Choose an image (PNG or JPG):</label>
+        <input id="file" name="file" type="file" accept=".png,.jpg,.jpeg" required>
+        <button type="submit">Upload</button>
+    </form>
+    <footer>
+        <p>Need the JSON API? Upload first, then call <code>POST /solve</code> with the returned <code>image_id</code>.</p>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Select Points</title>
+    <style>
+        body { font-family: Arial, Helvetica, sans-serif; margin: 2rem auto; max-width: 62rem; line-height: 1.5; }
+        h1 { color: #0b3d62; }
+        .layout { display: grid; grid-template-columns: 3fr 2fr; gap: 1.5rem; align-items: start; }
+        .image-box { position: relative; border: 1px solid #d0d0d0; background: #fff; padding: 0.5rem; }
+        .image-box img { width: 100%; height: auto; display: block; }
+        .image-box canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        .panel { border: 1px solid #d0d0d0; padding: 1.25rem; border-radius: 8px; background: #f7fbff; }
+        label { display: block; margin-top: 0.75rem; font-weight: bold; }
+        select, input[type="number"] { width: 100%; padding: 0.5rem; margin-top: 0.25rem; }
+        button { background: #0b84f3; color: #fff; border: none; padding: 0.65rem 1.25rem; border-radius: 6px; cursor: pointer; margin-right: 0.5rem; }
+        button:hover { background: #095db4; }
+        .secondary { background: #f0f1f3; color: #184366; }
+        .secondary:hover { background: #d6d7d9; }
+        .summary { margin-top: 1rem; font-size: 0.9rem; background: #fff; padding: 0.75rem; border-radius: 6px; border: 1px solid #d0d0d0; max-height: 18rem; overflow-y: auto; }
+        .badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 4px; font-size: 0.8rem; color: #fff; margin-right: 0.4rem; }
+        .start { background: #d81b60; }
+        .goal { background: #f9a825; }
+        .waypoint { background: #2e7d32; }
+        .obstacle { background: #c62828; }
+        @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <h1>Pick Start, Goal, Waypoints, and Obstacles</h1>
+    <p>Click on the image to place points. Choose the current mode below. Coordinates are recorded in pixel units (x, y).</p>
+    <div class="layout">
+        <div class="image-box">
+            <img id="uploaded-image" src="{{ image_url }}" alt="Uploaded image" crossorigin="anonymous">
+            <canvas id="overlay" width="{{ width }}" height="{{ height }}"></canvas>
+        </div>
+        <div class="panel">
+            <form id="solve-form" action="/solve" method="post">
+                <input type="hidden" name="image_id" value="{{ image_id }}">
+                <input type="hidden" id="coords-json" name="coords_json" value="{}">
+
+                <label for="mode-select">Click Mode</label>
+                <select id="mode-select">
+                    <option value="start" selected>Set Start</option>
+                    <option value="goal">Set Goal</option>
+                    <option value="waypoint">Waypoint</option>
+                    <option value="obstacle">Obstacle</option>
+                </select>
+
+                <label for="dark-threshold">Dark Pixel Threshold (0-255)</label>
+                <input id="dark-threshold" name="dark_threshold" type="number" min="0" max="255" value="80">
+
+                <label for="neighbor-mode">Neighbor Mode</label>
+                <select id="neighbor-mode" name="neighbor_mode">
+                    <option value="4">4-neighbor (N, S, E, W)</option>
+                    <option value="8" selected>8-neighbor (includes diagonals)</option>
+                </select>
+
+                <label for="heuristic">Heuristic</label>
+                <select id="heuristic" name="heuristic">
+                    <option value="euclidean" selected>Euclidean</option>
+                    <option value="manhattan">Manhattan</option>
+                </select>
+
+                <div style="margin-top: 1rem;">
+                    <button type="button" class="secondary" id="reset-btn">Reset Points</button>
+                    <button type="submit" id="solve-btn">Run A*</button>
+                </div>
+            </form>
+            <div class="summary" id="summary"></div>
+        </div>
+    </div>
+
+    <script>
+        const image = document.getElementById("uploaded-image");
+        const canvas = document.getElementById("overlay");
+        const ctx = canvas.getContext("2d");
+        const modeSelect = document.getElementById("mode-select");
+        const summaryBox = document.getElementById("summary");
+        const coordsInput = document.getElementById("coords-json");
+        const resetBtn = document.getElementById("reset-btn");
+        const solveBtn = document.getElementById("solve-btn");
+
+        const state = {
+            start: null,
+            goal: null,
+            waypoints: [],
+            obstacles: []
+        };
+
+        function drawPoints() {
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const drawCircle = (pt, color) => {
+                ctx.beginPath();
+                ctx.arc(pt[0], pt[1], 8, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.globalAlpha = 0.85;
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            };
+
+            if (state.start) drawCircle(state.start, "#d81b60");
+            if (state.goal) drawCircle(state.goal, "#f9a825");
+            state.waypoints.forEach(pt => drawCircle(pt, "#2e7d32"));
+            state.obstacles.forEach(pt => drawCircle(pt, "#c62828"));
+        }
+
+        function updateSummary() {
+            const line = (label, value, badgeClass) => `<div><span class="badge ${badgeClass}">${label}</span>${value}</div>`;
+            const formatPoint = pt => pt ? `(${pt[0]}, ${pt[1]})` : "—";
+            const waypointLines = state.waypoints.map((pt, idx) => line(`W${idx + 1}`, formatPoint(pt), "waypoint"));
+            const obstacleLines = state.obstacles.map((pt, idx) => line(`O${idx + 1}`, formatPoint(pt), "obstacle"));
+            summaryBox.innerHTML = [
+                line("Start", formatPoint(state.start), "start"),
+                line("Goal", formatPoint(state.goal), "goal"),
+                ...waypointLines,
+                ...obstacleLines
+            ].join("");
+        }
+
+        function updateHiddenInput() {
+            const payload = {
+                start: state.start,
+                goal: state.goal,
+                waypoints: state.waypoints,
+                obstacles: state.obstacles
+            };
+            coordsInput.value = JSON.stringify(payload);
+            solveBtn.disabled = !(state.start && state.goal);
+        }
+
+        function scalePoint(event) {
+            const rect = image.getBoundingClientRect();
+            const scaleX = image.naturalWidth / rect.width;
+            const scaleY = image.naturalHeight / rect.height;
+            const x = Math.round((event.clientX - rect.left) * scaleX);
+            const y = Math.round((event.clientY - rect.top) * scaleY);
+            return [x, y];
+        }
+
+        function handleImageClick(event) {
+            const point = scalePoint(event);
+            const mode = modeSelect.value;
+
+            if (mode === "start") {
+                state.start = point;
+                if (!state.goal) {
+                    modeSelect.value = "goal";
+                } else {
+                    modeSelect.value = "waypoint";
+                }
+            } else if (mode === "goal") {
+                state.goal = point;
+                modeSelect.value = "waypoint";
+            } else if (mode === "waypoint") {
+                state.waypoints.push(point);
+            } else if (mode === "obstacle") {
+                state.obstacles.push(point);
+            }
+
+            drawPoints();
+            updateSummary();
+            updateHiddenInput();
+        }
+
+        function resetState() {
+            state.start = null;
+            state.goal = null;
+            state.waypoints = [];
+            state.obstacles = [];
+            modeSelect.value = "start";
+            drawPoints();
+            updateSummary();
+            updateHiddenInput();
+        }
+
+        image.addEventListener("load", () => {
+            drawPoints();
+            updateSummary();
+            updateHiddenInput();
+        });
+
+        image.addEventListener("click", handleImageClick);
+        resetBtn.addEventListener("click", resetState);
+
+        document.getElementById("solve-form").addEventListener("submit", (event) => {
+            if (!(state.start && state.goal)) {
+                event.preventDefault();
+                alert("Please set both start and goal points before solving.");
+            }
+        });
+    </script>
+</body>
+</html>

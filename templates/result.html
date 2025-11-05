@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Pathfinding Result</title>
+    <style>
+        body { font-family: Arial, Helvetica, sans-serif; margin: 2rem auto; max-width: 72rem; line-height: 1.6; }
+        h1 { color: #0b3d62; }
+        .meta { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-bottom: 1.5rem; }
+        .meta-section { flex: 1 1 16rem; background: #f5f9ff; border: 1px solid #d0d0d0; border-radius: 8px; padding: 1rem; }
+        .media-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.25rem; }
+        .media-grid img, .media-grid video { width: 100%; border: 1px solid #d0d0d0; border-radius: 8px; }
+        a.button { display: inline-block; margin-top: 0.75rem; background: #0b84f3; color: #fff; padding: 0.5rem 1.15rem; border-radius: 6px; text-decoration: none; }
+        a.button:hover { background: #095db4; }
+        code { background: #eef3f8; padding: 0.15rem 0.35rem; border-radius: 4px; }
+        ul { padding-left: 1.25rem; }
+    </style>
+</head>
+<body>
+    <h1>Pathfinding Result</h1>
+    <div class="meta">
+        <div class="meta-section">
+            <h2>Overview</h2>
+            <p><strong>Image ID:</strong> <code>{{ image_id }}</code></p>
+            <p><strong>Path nodes:</strong> {{ path_length }}</p>
+            <p><strong>Explored nodes:</strong> {{ explored_count }}</p>
+        </div>
+        <div class="meta-section">
+            <h2>Settings</h2>
+            <ul>
+                <li>Threshold: {{ settings.dark_threshold | default('-') }}</li>
+                <li>Neighbors: {{ settings.neighbor_mode | default('-') }}</li>
+                <li>Heuristic: {{ settings.heuristic | default('-') }}</li>
+                <li>Waypoints: {{ settings.waypoint_count | default(0) }}</li>
+                <li>Obstacles: {{ settings.obstacle_count | default(0) }}</li>
+            </ul>
+        </div>
+        <div class="meta-section">
+            <h2>Downloads</h2>
+            <a class="button" href="{{ summary_url }}" download>Download Summary PNG</a><br>
+            <a class="button" href="{{ animation_url }}" download>Download Animation</a>
+        </div>
+    </div>
+
+    <div class="media-grid">
+        <div>
+            <h3>Summary Figure</h3>
+            <img src="{{ summary_url }}" alt="Summary figure">
+        </div>
+        <div>
+            <h3>Search Animation</h3>
+            {% if animation_media_type and animation_media_type.startswith('video/') %}
+            <video src="{{ animation_url }}" controls preload="metadata"></video>
+            {% else %}
+            <img src="{{ animation_url }}" alt="Search animation (GIF)">
+            {% endif %}
+        </div>
+    </div>
+
+    <h2>Path Coordinates</h2>
+    {% if path_points %}
+    <ul>
+        {% for pt in path_points %}
+        <li>({{ pt[0] }}, {{ pt[1] }})</li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No path points recorded.</p>
+    {% endif %}
+
+    <p><a href="/">Upload another image</a></p>
+</body>
+</html>
