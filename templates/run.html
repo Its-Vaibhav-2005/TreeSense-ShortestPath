@@ -1,11 +1,178 @@
 <!doctype html>
 <html>
-  <head><meta charset="utf-8"><title>Processing</title></head>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Processing</title>
+    <style>
+      :root{
+        --bg: #040504; /* almost black */
+        --panel: #07120a; /* dark greenish panel */
+        --accent: #14ff7f; /* neon green */
+        --muted: #6b776d; /* muted green */
+        --text: #d6f8e0; /* pale green */
+        --glass: rgba(20,31,20,0.45);
+      }
+
+      html,body{
+        height:100%;
+        margin:0;
+        font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+        background: linear-gradient(180deg, var(--bg) 0%, #06130a 100%);
+        color:var(--text);
+        -webkit-font-smoothing:antialiased;
+      }
+
+      .wrap{
+        max-width:1100px;
+        margin:18px auto;
+        padding:18px;
+        box-sizing:border-box;
+      }
+
+      header{
+        display:flex;
+        gap:12px;
+        align-items:center;
+        margin-bottom:12px;
+      }
+
+      header h1{
+        margin:0;
+        font-size:1.25rem;
+        letter-spacing:0.6px;
+        color:var(--accent);
+      }
+
+      header p.subtitle{
+        margin:0;
+        color:var(--muted);
+        font-size:0.9rem;
+      }
+
+      .stream{
+        display:grid;
+        grid-template-columns: 1fr 420px;
+        gap:14px;
+        align-items:start;
+      }
+
+      /* Responsive: stack on narrow screens */
+      @media (max-width:900px){
+        .stream{grid-template-columns:1fr;}
+      }
+
+      .frame-card, .log-card{
+        background: linear-gradient(180deg, rgba(0,0,0,0.25), var(--panel));
+        border-radius:10px;
+        padding:12px;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+        border: 1px solid rgba(20,50,27,0.35);
+      }
+
+      .frame-wrapper{
+        display:flex;
+        flex-direction:column;
+        gap:8px;
+      }
+
+      .frame-inner{
+        display:flex;
+        justify-content:center;
+        align-items:center;
+        background:var(--glass);
+        padding:6px;
+        border-radius:8px;
+        min-height:140px;
+      }
+
+      #frame{
+        max-width:100%;
+        height:auto;
+        border-radius:6px;
+        display:block;
+        width:100%;
+        object-fit:contain;
+        background:#001007;
+      }
+
+      .log-card{
+        display:flex;
+        flex-direction:column;
+        gap:8px;
+      }
+
+      .log-actions{
+        display:flex;
+        gap:8px;
+        align-items:center;
+        justify-content:space-between;
+      }
+
+      .status-pill{
+        padding:6px 10px;
+        border-radius:999px;
+        background:rgba(20,255,127,0.06);
+        color:var(--accent);
+        border:1px solid rgba(20,255,127,0.12);
+        font-weight:600;
+        font-size:0.85rem;
+      }
+
+      pre#log{
+        margin:0;
+        white-space:pre-wrap;
+        overflow:auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Courier New", monospace;
+        font-size:0.9rem;
+        line-height:1.35;
+        color:var(--text);
+        background:linear-gradient(180deg, rgba(0,0,0,0.22), rgba(2,8,2,0.12));
+        border-radius:6px;
+        padding:12px;
+        max-height:62vh;
+      }
+
+      /* smaller log height on small screens */
+      @media (max-width:900px){
+        pre#log{max-height:36vh;}
+      }
+
+      .muted{color:var(--muted);font-size:0.9rem}
+    </style>
+  </head>
   <body>
-    <h3>Processing</h3>
-    <p>This page streams logs live.</p>
-    <img id="frame" src="/image/{{ jobId }}/current.png?ts={{ ts }}" alt="Current frame" width="700"/>
-    <pre id="log" style="white-space: pre-wrap;"></pre>
+    <div class="wrap">
+      <header>
+        <div>
+          <h1>Processing</h1>
+          <p class="subtitle">Streaming live — frames & logs</p>
+        </div>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+          <span class="status-pill">Live</span>
+        </div>
+      </header>
+
+      <main class="stream">
+        <section class="frame-card">
+          <div class="frame-wrapper">
+            <div class="muted">Current frame</div>
+            <div class="frame-inner">
+              <img id="frame" src="/image/{{ jobId }}/current.png?ts={{ ts }}" alt="Current frame"/>
+            </div>
+            <div class="muted" style="font-size:0.85rem">The image refreshes automatically every second.</div>
+          </div>
+        </section>
+
+        <aside class="log-card">
+          <div class="log-actions">
+            <div class="muted">Live log</div>
+            <div class="muted">Job: <strong style="color:var(--text)">{{ jobId }}</strong></div>
+          </div>
+          <pre id="log" style="white-space: pre-wrap;"></pre>
+        </aside>
+      </main>
+    </div>
 
     <script>
       const jobId = "{{ jobId }}";
@@ -14,6 +181,7 @@
       const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + jobId);
 
       function refreshFrame() {
+        // Keep same behavior: update `src` with timestamp to bust cache
         frameEl.src = "/image/" + jobId + "/current.png?ts=" + Date.now();
       }
 
@@ -22,6 +190,8 @@
           const msg = JSON.parse(ev.data);
           if (msg.type === "log") {
             logEl.textContent += msg.msg + "\n";
+            // auto-scroll to bottom when new log arrives
+            logEl.scrollTop = logEl.scrollHeight;
           } else if (msg.type === "frame") {
             refreshFrame();
           } else if (msg.type === "done") {
@@ -40,6 +210,7 @@
       ws.onerror = () => { logEl.textContent += "WebSocket error.\n"; };
       ws.onclose = () => { logEl.textContent += "Closed.\n"; };
 
+      // keep the existing refresh cadence; safe to change interval later if desired
       setInterval(refreshFrame, 1000);
     </script>
   </body>
