@@ -8,12 +8,15 @@ import shutil
 import threading
 import time
 import uuid
+import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Deque, Dict, List, Optional, Tuple
 
+import imageio_ffmpeg
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,7 +31,6 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, FileResponse
-from matplotlib.animation import FFMpegWriter
 from PIL import Image
 
 # ---------------- Types ----------------
@@ -173,6 +175,7 @@ class AStarAnimator:
                 self.frameBuffer[py, px] = [255, 0, 0]
         return self.frameBuffer
 
+# ---------------- Summary Plot ----------------
 def plotPathsSummary(anim: AStarAnimator, rgb: np.ndarray, original: np.ndarray, costMap: np.ndarray):
     if not anim.path:
         return None
@@ -233,20 +236,80 @@ def fallbackStraightPath(start: Point, goal: Point) -> List[Point]:
             y0 += sy
     return path
 
-def resolveFfmpegPath() -> str:
-    ffmpegPath = plt.rcParams.get("animation.ffmpeg_path")
-    if ffmpegPath and Path(ffmpegPath).is_file():
-        return ffmpegPath
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
+# ---------------- Video Save (imageio-ffmpeg) ----------------
+
+def save_animation(
+    anim: AStarAnimator,
+    interval_ms: int,
+    output_path: Path,
+    hold_frames: int = 15,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    fps = max(1, int(round(1000 / interval_ms)))
+    h, w = anim.rgb.shape[:2]
+    size = f"{w}x{h}"
+
+    process = subprocess.Popen(
+        [
+            ffmpeg_path,
+            "-y",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s", size,
+            "-r", str(fps),
+            "-i", "-",
+            "-an",
+            "-vcodec", "libx264",
+            "-pix_fmt", "yuv420p",
+            str(output_path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
     try:
-        import imageio_ffmpeg  # type: ignore
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        # First frame
+        frame = anim.step()
+        process.stdin.write(frame.tobytes())
+
+        # Stream frames until done
+        while not anim.done:
+            frame = anim.step()
+            process.stdin.write(frame.tobytes())
+
+        # Hold last frame
+        for _ in range(hold_frames):
+            process.stdin.write(anim.frameBuffer.tobytes())
+
+        process.stdin.close()
+        stderr_output = process.stderr.read().decode("utf-8", errors="ignore")
+        process.wait()
+
+        if process.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed (code {process.returncode}): {stderr_output}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError("ffmpeg wrote no output or empty file")
+
     except Exception as exc:
-        raise RuntimeError(
-            "ffmpeg not found. Install ffmpeg or install imageio-ffmpeg."
-        ) from exc
+        try:
+            process.kill()
+        except Exception:
+            pass
+        raise RuntimeError(f"Failed to save animation video: {exc}") from exc
+    finally:
+        try:
+            if process.poll() is None:
+                process.terminate()
+            process.stderr.close()
+        except Exception:
+            pass
+
+    return output_path
 
 # ---------------- Job Model ----------------
 @dataclass
@@ -316,59 +379,35 @@ def runPipeline(job: Job, expansionsPerFrame: int = 25, intervalMs: int = 12) ->
         if job.start is None or job.goal is None:
             job.error = "Start and Goal not set"
             job.log("Error: start and goal not set")
+            job.done = True
             return
 
         job.log(f"Starting A* search from {job.start} to {job.goal}")
         animator = AStarAnimator(rgb, costMap, job.start, job.goal, expansionsPerFrame=expansionsPerFrame)
         job.animator = animator
 
+        # Save animation via imageio-ffmpeg
         videoDir = job.outputRoot / "video"
         imageDir = job.outputRoot / "image"
         videoDir.mkdir(parents=True, exist_ok=True)
         imageDir.mkdir(parents=True, exist_ok=True)
         videoPath = videoDir / "search_animation.mp4"
 
-        # Resolve ffmpeg
         try:
-            resolved = resolveFfmpegPath()
-            plt.rcParams["animation.ffmpeg_path"] = resolved
-            writer = FFMpegWriter(fps=max(1, int(round(1000 / intervalMs))), codec="libx264", bitrate=1800)
-            job.log("ffmpeg resolved and writer ready")
+            job.log("Writing video with imageio-ffmpeg")
+            final_path = save_animation(animator, interval_ms=intervalMs, output_path=videoPath, hold_frames=15)
+            job.finalVideoPath = final_path
+            job.log(f"Video saved: {final_path}")
         except Exception as exc:
-            job.log(f"Video disabled: {exc}")
-            writer = None  # type: ignore
+            job.log(f"Video export failed: {exc}")
+            # Still advance to completion to produce summary
+            while not animator.done:
+                frame = animator.step()
+                job.currentFrame = frame.copy()
 
-        # Save animation with live frame tap
-        fig, ax = plt.subplots(figsize=(8, 8 * animator.rgb.shape[0] / animator.rgb.shape[1]))
-        ax.set_title("A* Pathfinding — Blue: explored, Red: best path, Green: vegetation")
-        ax.axis("off")
-        frame = animator.step()
-        im = ax.imshow(frame)
-        job.currentFrame = frame.copy()
-
-        try:
-            if writer is not None:
-                with writer.saving(fig, str(videoPath), 120):
-                    writer.grab_frame()
-                    job.log("Animation frame 1 recorded")
-                    while not animator.done:
-                        frame = animator.step()
-                        im.set_data(frame)
-                        writer.grab_frame()
-                        job.currentFrame = frame.copy()
-                    for _ in range(15):
-                        writer.grab_frame()
-                job.finalVideoPath = videoPath
-                job.log(f"Video saved: {videoPath}")
-            else:
-                while not animator.done:
-                    frame = animator.step()
-                    im.set_data(frame)
-                    job.currentFrame = frame.copy()
-        except Exception as exc:
-            job.log(f"Animation failed: {exc}")
-        finally:
-            plt.close(fig)
+        # Update current frame at the end
+        if animator.done:
+            job.currentFrame = animator.frameBuffer.copy()
 
         if animator.path:
             treesCrossed = int(np.sum(treeMask[tuple(np.array(animator.path).T)]))
@@ -411,6 +450,7 @@ INDEX_HTML = """<!doctype html>
   </body>
 </html>
 """
+
 
 SELECT_POINTS_HTML = """<!doctype html>
 <html>
@@ -470,6 +510,7 @@ SELECT_POINTS_HTML = """<!doctype html>
 </html>
 """
 
+
 RUN_HTML = """<!doctype html>
 <html>
   <body>
@@ -498,7 +539,6 @@ RUN_HTML = """<!doctype html>
           }} else if (msg.type === "done") {{
             logEl.textContent += "[done]\\n";
             ws.close();
-            // Redirect after 1.5s
             setTimeout(() => {{
               window.location.href = "/result/" + jobId;
             }}, 1500);
@@ -519,6 +559,9 @@ RUN_HTML = """<!doctype html>
 """
 
 
+# ---------------- Routes ----------------
+app = FastAPI(title="Jungle Path A* — Minimal UI")
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return INDEX_HTML
@@ -537,7 +580,6 @@ async def upload(image: UploadFile = File(...)):
     dst.write_bytes(data)
 
     job = JOB_STORE.create(dst)
-    # prepare base image for selection page
     try:
         rgb = loadImage(str(dst), maxDim=900)
         job.rgb = rgb
@@ -584,7 +626,6 @@ def start(
     job = JOB_STORE.get(jobId)
     if job.rgb is None:
         raise HTTPException(status_code=400, detail="Image not loaded")
-    # Clamp to bounds
     h, w = job.rgb.shape[0], job.rgb.shape[1]
     sY = max(0, min(int(startY), h - 1))
     sX = max(0, min(int(startX), w - 1))
@@ -596,9 +637,8 @@ def start(
     job.log(f"Goal set to {job.goal}")
     job.log(f"Expansions per frame: {expansionsPerFrame}")
 
-    # Kick background processing
     backgroundTasks.add_task(runPipeline, job, expansionsPerFrame, 12)
-    return HTMLResponse(RUN_HTML.format(jobId=jobId, ts=int(time.time()*1000)))
+    return HTMLResponse(RUN_HTML.format(jobId=jobId, ts=int(time.time() * 1000)))
 
 @app.get("/status/{jobId}")
 def status(jobId: str):
@@ -607,7 +647,7 @@ def status(jobId: str):
         "done": job.done,
         "error": job.error,
         "summaryPath": f"/summary/{jobId}.png" if job.summaryImagePath and job.summaryImagePath.exists() else None,
-        "videoPath": f"/video/{jobId}.mp4" if job.finalVideoPath and job.finalVideoPath.exists() else None,
+        "videoPath": f"/stream/video/{jobId}" if job.finalVideoPath and job.finalVideoPath.exists() else None,
     }
 
 @app.get("/summary/{jobId}.png")
@@ -618,11 +658,23 @@ def get_summary(jobId: str):
     return FileResponse(job.summaryImagePath, media_type="image/png")
 
 @app.get("/video/{jobId}.mp4")
-def get_video(jobId: str):
+def get_video_legacy(jobId: str):
     job = JOB_STORE.get(jobId)
     if not job.finalVideoPath or not job.finalVideoPath.exists():
         raise HTTPException(status_code=404, detail="Video not available")
     return FileResponse(job.finalVideoPath, media_type="video/mp4", filename="search_animation.mp4")
+
+@app.get("/stream/video/{jobId}")
+def stream_video(jobId: str):
+    job = JOB_STORE.get(jobId)
+    if not job.finalVideoPath or not job.finalVideoPath.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+    return FileResponse(
+        job.finalVideoPath,
+        media_type="video/mp4",
+        filename=f"{jobId}.mp4",
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 # ---------------- WebSocket Log Stream ----------------
 @app.websocket("/ws/{jobId}")
@@ -637,20 +689,16 @@ async def ws_logs(ws: WebSocket, jobId: str):
 
     lastLen = 0
     try:
-        # Push existing logs
         for msg in list(job.logs):
             await ws.send_text(json.dumps({"type": "log", "msg": msg}))
 
-        # Stream updates
         while True:
             await asyncio.sleep(0.3)
-            # Send new logs
             with job.lock:
                 if len(job.logs) > lastLen:
                     for idx in range(lastLen, len(job.logs)):
                         await ws.send_text(json.dumps({"type": "log", "msg": job.logs[idx]}))
                     lastLen = len(job.logs)
-            # Send frame tick
             await ws.send_text(json.dumps({"type": "frame"}))
             if job.done:
                 await ws.send_text(json.dumps({"type": "done"}))
@@ -659,7 +707,7 @@ async def ws_logs(ws: WebSocket, jobId: str):
         return
     except Exception as exc:
         try:
-            await ws.send_text(json.dumps({"type": "log", "msg": f'WebSocket error: {exc}'}))
+            await ws.send_text(json.dumps({"type": "log", "msg": f"WebSocket error: {exc}"}))
         except Exception:
             pass
         finally:
@@ -667,42 +715,28 @@ async def ws_logs(ws: WebSocket, jobId: str):
                 await ws.close()
             except Exception:
                 pass
+
+# ---------------- Result Page ----------------
 @app.get("/result/{jobId}", response_class=HTMLResponse)
 def result_page(jobId: str):
     job = JOB_STORE.get(jobId)
     if not job.done:
         return HTMLResponse(f"<h3>Job {jobId} still running...</h3>", status_code=202)
 
+    summary_available = job.summaryImagePath and job.summaryImagePath.exists()
+    video_available = job.finalVideoPath and job.finalVideoPath.exists()
+
     html = f"""<!doctype html>
 <html>
   <body>
     <h2>Processing Complete</h2>
-    <h3>Summary Image</h3>
-    <img src="/summary/{jobId}.png" width="700" alt="summary image" />
 
-    <h3>Search Animation</h3>
-    <video width="700" controls autoplay loop>
-      <source src="/video/{jobId}.mp4" type="video/mp4">
-      Your browser does not support the video tag.
-    </video>
+    {'<h3>Summary Image</h3><img src="/summary/' + jobId + '.png" width="720" alt="Summary">' if summary_available else '<p>No summary image available.</p>'}
+
+    {'<h3>Search Animation</h3><video width="720" controls autoplay loop><source src="/stream/video/' + jobId + '" type="video/mp4">Your browser does not support the video tag.</video>' if video_available else '<p>No video available.</p>'}
 
     <br><br>
     <a href="/">← Upload Another Image</a>
   </body>
-</html>
-"""
+</html>"""
     return HTMLResponse(html)
-
-@app.get("/stream/video/{jobId}")
-def stream_video(jobId: str):
-    job = JOB_STORE.get(jobId)
-    if not job.finalVideoPath or not job.finalVideoPath.exists():
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    # Serve video properly for browsers (supports seeking)
-    return FileResponse(
-        job.finalVideoPath,
-        media_type="video/mp4",
-        filename=f"{jobId}.mp4",
-        headers={"Accept-Ranges": "bytes"}
-    )
