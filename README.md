@@ -59,3 +59,4 @@ Successful responses include the ordered path, explored nodes, and URLs to downl
 - Dark pixels (grayscale below `dark_threshold`) are obstacles; you can also manually mark per-pixel obstacles.
 - Choose 4- or 8-neighbor movement and Manhattan or Euclidean heuristic at solve time.
 - Intermediate artifacts are stored under `data/` with per-image subdirectories.
+- If your selected start/goal or any waypoint lands on a blocked pixel the solver nudges it to the closest free pixel and records that adjustment in the result metadata.

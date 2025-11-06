@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from collections import deque
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import heapq
 import numpy as np
@@ -142,6 +143,45 @@ def parse_int(value, default: int, name: str) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"{name} must be an integer.") from exc
+
+
+def find_nearest_free_cell(grid: np.ndarray, start: Point) -> Optional[Point]:
+    """Return the closest free cell to `start` or None if the grid is fully blocked."""
+
+    if not grid[start]:
+        return start
+
+    rows, cols = grid.shape
+    q: deque[Point] = deque([start])
+    visited: set[Point] = {start}
+
+    # Allow 8-direction expansion to find the nearest free pixel quickly.
+    neighbor_offsets = [
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1),
+        (-1, -1),
+        (-1, 1),
+        (1, -1),
+        (1, 1),
+    ]
+
+    while q:
+        cy, cx = q.popleft()
+        for dy, dx in neighbor_offsets:
+            ny, nx = cy + dy, cx + dx
+            if not (0 <= ny < rows and 0 <= nx < cols):
+                continue
+            neighbor = (ny, nx)
+            if neighbor in visited:
+                continue
+            if not grid[neighbor]:
+                return neighbor
+            visited.add(neighbor)
+            q.append(neighbor)
+
+    return None
 
 
 def movement_vectors(mode: str) -> List[Tuple[int, int, float]]:
@@ -499,6 +539,42 @@ def process_solve_request(
     goal_rc = xy_to_rc(goal_xy)
     waypoint_rc = [xy_to_rc(pt) for pt in waypoints_xy]
 
+    start_adjusted = False
+    goal_adjusted = False
+    waypoint_adjustments: List[Dict[str, object]] = []
+
+    if obstacle_grid[start_rc]:
+        nearest = find_nearest_free_cell(obstacle_grid, start_rc)
+        if nearest is None:
+            raise HTTPException(status_code=400, detail="Start lies on an obstacle and no nearby free cell found.")
+        start_rc = nearest
+        start_adjusted = True
+
+    if obstacle_grid[goal_rc]:
+        nearest = find_nearest_free_cell(obstacle_grid, goal_rc)
+        if nearest is None:
+            raise HTTPException(status_code=400, detail="Goal lies on an obstacle and no nearby free cell found.")
+        goal_rc = nearest
+        goal_adjusted = True
+
+    for idx, wpt in enumerate(list(waypoint_rc)):
+        if not obstacle_grid[wpt]:
+            continue
+        nearest = find_nearest_free_cell(obstacle_grid, wpt)
+        if nearest is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Waypoint {idx + 1} lies on an obstacle and no nearby free cell found.",
+            )
+        waypoint_adjustments.append(
+            {
+                "index": idx + 1,
+                "original": list(rc_to_xy(wpt)),
+                "adjusted": list(rc_to_xy(nearest)),
+            }
+        )
+        waypoint_rc[idx] = nearest
+
     path_rc, explored_rc = solve_with_waypoints(
         obstacle_grid,
         start_rc,
@@ -539,6 +615,9 @@ def process_solve_request(
             "heuristic": heuristic_name,
             "waypoint_count": len(waypoint_rc),
             "obstacle_count": len(obstacle_points_xy),
+            "start_adjusted": start_adjusted,
+            "goal_adjusted": goal_adjusted,
+            "waypoint_adjustments": waypoint_adjustments,
         },
     )
     store_result_metadata(result)

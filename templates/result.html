@@ -33,6 +33,13 @@
                 <li>Heuristic: {{ settings.heuristic | default('-') }}</li>
                 <li>Waypoints: {{ settings.waypoint_count | default(0) }}</li>
                 <li>Obstacles: {{ settings.obstacle_count | default(0) }}</li>
+                <li>Start adjusted: {{ settings.start_adjusted | default(false) }}</li>
+                <li>Goal adjusted: {{ settings.goal_adjusted | default(false) }}</li>
+                {% if settings.waypoint_adjustments %}
+                <li>Adjusted waypoints: {{ settings.waypoint_adjustments | length }}</li>
+                {% else %}
+                <li>Adjusted waypoints: 0</li>
+                {% endif %}
             </ul>
         </div>
         <div class="meta-section">
@@ -58,6 +65,20 @@
     </div>
 
     <h2>Path Coordinates</h2>
+    {% if settings.start_adjusted %}
+    <p><strong>Note:</strong> Start point was moved slightly to the nearest free pixel because the original selection fell on an obstacle.</p>
+    {% endif %}
+    {% if settings.goal_adjusted %}
+    <p><strong>Note:</strong> Goal point was moved slightly to the nearest free pixel because the original selection fell on an obstacle.</p>
+    {% endif %}
+    {% if settings.waypoint_adjustments %}
+    <p><strong>Note:</strong> Some waypoints were nudged to nearby free pixels:</p>
+    <ul>
+        {% for adj in settings.waypoint_adjustments %}
+        <li>Waypoint {{ adj.index }}: {{ adj.original }} → {{ adj.adjusted }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
     {% if path_points %}
     <ul>
         {% for pt in path_points %}
