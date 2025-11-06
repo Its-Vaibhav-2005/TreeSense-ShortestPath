@@ -440,31 +440,31 @@ SELECT_POINTS_HTML = """<!doctype html>
       const goalX = document.getElementById("goalX");
       let clicks = [];
       const img = new Image();
-      img.onload = () => { cnv.width = img.width; cnv.height = img.height; ctx.drawImage(img,0,0); };
+      img.onload = () => {{ cnv.width = img.width; cnv.height = img.height; ctx.drawImage(img,0,0); }};
       img.src = imgUrl;
 
-      function drawMarkers() {
+      function drawMarkers() {{
         ctx.drawImage(img,0,0);
-        if (clicks[0]) {
+        if (clicks[0]) {{
           ctx.fillStyle = "magenta";
           ctx.fillRect(clicks[0].x-2, clicks[0].y-2, 5, 5);
-        }
-        if (clicks[1]) {
+        }}
+        if (clicks[1]) {{
           ctx.fillStyle = "yellow";
           ctx.fillRect(clicks[1].x-2, clicks[1].y-2, 5, 5);
-        }
-      }
-      cnv.addEventListener("click", (e) => {
+        }}
+      }}
+      cnv.addEventListener("click", (e) => {{
         const rect = cnv.getBoundingClientRect();
         const x = Math.round(e.clientX - rect.left);
         const y = Math.round(e.clientY - rect.top);
-        if (clicks.length < 2) { clicks.push({x, y}); } else { clicks = [{x, y}]; }
+        if (clicks.length < 2) {{ clicks.push({{x, y}}); }} else {{ clicks = [{{x, y}}]; }}
         drawMarkers();
-        if (clicks[0]) { startY.value = clicks[0].y; startX.value = clicks[0].x; }
-        if (clicks[1]) { goalY.value = clicks[1].y; goalX.value = clicks[1].x; }
+        if (clicks[0]) {{ startY.value = clicks[0].y; startX.value = clicks[0].x; }}
+        if (clicks[1]) {{ goalY.value = clicks[1].y; goalX.value = clicks[1].x; }}
         coordsDiv.textContent = "Start: " + (clicks[0] ? clicks[0].y + "," + clicks[0].x : "-") +
                                 " | Goal: " + (clicks[1] ? clicks[1].y + "," + clicks[1].x : "-");
-      });
+      }});
     </script>
   </body>
 </html>
@@ -485,61 +485,62 @@ RUN_HTML = """<!doctype html>
       const linksEl = document.getElementById("links");
       const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + jobId);
 
-      function refreshFrame() {
+      function refreshFrame() {{
         // Bust cache with timestamp
         frameEl.src = "/image/" + jobId + "/current.png?ts=" + Date.now();
-      }
+      }}
 
-      ws.onmessage = (ev) => {
-        try {
+      ws.onmessage = (ev) => {{
+        try {{
           const msg = JSON.parse(ev.data);
-          if (msg.type === "log") {
+          if (msg.type === "log") {{
             logEl.textContent += msg.msg + "\\n";
-          } else if (msg.type === "frame") {
+          }} else if (msg.type === "frame") {{
             refreshFrame();
-          } else if (msg.type === "done") {
+          }} else if (msg.type === "done") {{
             logEl.textContent += "[done]\\n";
             refreshFrame();
             linksEl.innerHTML = "";
-            fetch("/status/" + jobId).then(r => r.json()).then(s => {
-              if (s.summaryPath) { 
+            fetch("/status/" + jobId).then(r => r.json()).then(s => {{
+              if (s.summaryPath) {{ 
                 const a = document.createElement("a"); 
                 a.href = "/summary/" + jobId + ".png"; 
                 a.textContent = "Open Summary Image"; 
                 a.target = "_blank"; 
                 linksEl.appendChild(a);
-              }
-              if (s.videoPath) {
+              }}
+              if (s.videoPath) {{
                 const b = document.createElement("a");
                 b.href = "/video/" + jobId + ".mp4";
                 b.textContent = (linksEl.children.length ? " | " : "") + "Download Video";
                 linksEl.appendChild(document.createTextNode(" "));
                 linksEl.appendChild(b);
-              }
-              if (s.error) {
+              }}
+              if (s.error) {{
                 const e = document.createElement("div");
                 e.textContent = "Error: " + s.error;
                 linksEl.appendChild(document.createElement("br"));
                 linksEl.appendChild(e);
-              }
-            });
+              }}
+            }});
             ws.close();
-          }
-        } catch(e) {
+          }}
+        }} catch(e) {{
           logEl.textContent += "[parse-error] " + e + "\\n";
-        }
-      };
+        }}
+      }};
 
-      ws.onopen = () => { logEl.textContent += "Connected. Streaming logs...\\n"; };
-      ws.onerror = () => { logEl.textContent += "WebSocket error.\\n"; };
-      ws.onclose = () => { logEl.textContent += "Closed.\\n"; };
+      ws.onopen = () => {{ logEl.textContent += "Connected. Streaming logs...\\n"; }};
+      ws.onerror = () => {{ logEl.textContent += "WebSocket error.\\n"; }};
+      ws.onclose = () => {{ logEl.textContent += "Closed.\\n"; }};
 
       // Poll frame periodically while running
-      const iv = setInterval(() => { refreshFrame(); }, 1000);
+      const iv = setInterval(() => {{ refreshFrame(); }}, 1000);
     </script>
   </body>
 </html>
 """
+
 
 @app.get("/", response_class=HTMLResponse)
 def index():
