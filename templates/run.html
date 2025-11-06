@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+  <body>
+    <h3>Processing</h3>
+    <p>This page streams logs live. Please wait.</p>
+    <img id="frame" src="/image/{jobId}/current.png?ts={ts}" alt="Current frame" width="700"/>
+    <pre id="log" style="white-space: pre-wrap;"></pre>
+
+    <script>
+      const jobId = "{jobId}";
+      const frameEl = document.getElementById("frame");
+      const logEl = document.getElementById("log");
+      const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + jobId);
+
+      function refreshFrame() {{
+        frameEl.src = "/image/" + jobId + "/current.png?ts=" + Date.now();
+      }}
+
+      ws.onmessage = (ev) => {{
+        try {{
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "log") {{
+            logEl.textContent += msg.msg + "\\n";
+          }} else if (msg.type === "frame") {{
+            refreshFrame();
+          }} else if (msg.type === "done") {{
+            logEl.textContent += "[done]\\n";
+            ws.close();
+            setTimeout(() => {{
+              window.location.href = "/result/" + jobId;
+            }}, 1500);
+          }}
+        }} catch(e) {{
+          logEl.textContent += "[parse-error] " + e + "\\n";
+        }}
+      }};
+
+      ws.onopen = () => {{ logEl.textContent += "Connected. Streaming logs...\\n"; }};
+      ws.onerror = () => {{ logEl.textContent += "WebSocket error.\\n"; }};
+      ws.onclose = () => {{ logEl.textContent += "Closed.\\n"; }};
+
+      setInterval(refreshFrame, 1000);
+    </script>
+  </body>
+</html>
