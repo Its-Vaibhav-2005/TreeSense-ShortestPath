@@ -306,23 +306,17 @@ def solve_with_waypoints(
 
 
 def ensure_ffmpeg() -> str:
-    """Locate an ffmpeg executable suitable for encoding."""
-
     try:
         import imageio_ffmpeg  # type: ignore
-
         ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        ffmpeg_path = shutil.which("ffmpeg")
+        ffmpeg_path = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
         if not ffmpeg_path:
             raise HTTPException(
                 status_code=500,
-                detail=(
-                    "ffmpeg executable not available. Install ffmpeg or add the imageio-ffmpeg package."
-                ),
+                detail="ffmpeg executable not available. Install ffmpeg or add imageio-ffmpeg.",
             )
-
-    os.environ.setdefault("IMAGEIO_FFMPEG_EXE", ffmpeg_path)
+    os.environ["IMAGEIO_FFMPEG_EXE"] = ffmpeg_path
     return ffmpeg_path
 
 
@@ -403,6 +397,15 @@ def generate_summary_figure(
     plt.close(fig)
 
 
+# Add near the imports or just above generate_animation
+from math import ceil
+
+# Tunables. Keep small to avoid stalls on large grids.
+MAX_VIDEO_FRAMES = 1200      # hard cap including tail frames
+MAX_GIF_FRAMES = 300         # hard cap for GIF fallback
+TAIL_FRAMES = 15             # frames after exploration finishes
+FPS = 20                     # keep modest to limit work
+
 def generate_animation(
     rgb: np.ndarray,
     obstacle_grid: np.ndarray,
@@ -412,20 +415,30 @@ def generate_animation(
     goal_rc: Point,
     animation_path: Path,
 ) -> Tuple[Path, str]:
-    """Render the search animation and return the path plus media type."""
+    """
+    Render the search animation and return (path, media_type).
+
+    Changes:
+    - Stream frames to encoder (no giant in-memory list).
+    - Downsample explored frames if needed to respect caps.
+    - Prefer fast, broadly-available codecs.
+    - Constrained GIF fallback with subsampling.
+    """
 
     ensure_ffmpeg()
     animation_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Precompute masks once
     obstacle_mask = obstacle_grid.astype(bool)
     visited_mask = np.zeros_like(obstacle_grid, dtype=bool)
     path_mask = np.zeros_like(obstacle_grid, dtype=bool)
     if path:
-        coords = np.array(path)
+        coords = np.asarray(path, dtype=int)
         path_mask[coords[:, 0], coords[:, 1]] = True
 
     base = rgb.copy()
 
+    # Deduplicate explored nodes while preserving order
     unique_explored: List[Point] = []
     seen: set[Point] = set()
     for node in explored:
@@ -433,47 +446,72 @@ def generate_animation(
             seen.add(node)
             unique_explored.append(node)
 
-    total_frames = len(unique_explored) + 15
-    frames: List[np.ndarray] = []
-    for idx in range(total_frames):
-        if idx < len(unique_explored):
-            y, x = unique_explored[idx]
-            visited_mask[y, x] = True
-        frame = compose_animation_frame(base, obstacle_mask, visited_mask, path_mask, start_rc, goal_rc)
-        frames.append(np.ascontiguousarray(frame, dtype=np.uint8))
+    # Throttle frame count
+    max_explore_frames = max(0, MAX_VIDEO_FRAMES - TAIL_FRAMES)
+    explore_len = len(unique_explored)
+    stride = 1 if explore_len <= max_explore_frames else ceil(explore_len / max_explore_frames)
 
+    # Helper: one frame composition
+    def compose(idx_mark: Optional[int]) -> np.ndarray:
+        if idx_mark is not None:
+            y, x = unique_explored[idx_mark]
+            visited_mask[y, x] = True
+        frame = compose_animation_frame(
+            base,
+            obstacle_mask,
+            visited_mask,
+            path_mask,
+            start_rc,
+            goal_rc,
+        )
+        return np.ascontiguousarray(frame, dtype=np.uint8)
+
+    # Try MP4 first with a fast codec
     attempts = [
-        (animation_path.with_suffix(".mp4"), "libx264", "video/mp4"),
-        (animation_path.with_suffix(".mp4"), "mpeg4", "video/mp4"),
-        (animation_path.with_suffix(".webm"), "libvpx-vp9", "video/webm"),
+        (animation_path.with_suffix(".mp4"), "mpeg4", "video/mp4", {"fps": FPS, "quality": 7}),
+        (animation_path.with_suffix(".webm"), "libvpx-vp9", "video/webm", {"fps": FPS}),
     ]
 
-    last_error: Exception | None = None
-    for target, codec, media_type in attempts:
+    last_error: Optional[Exception] = None
+    for target, codec, media_type, extra in attempts:
         try:
             with imageio.get_writer(
                 str(target),
                 format="FFMPEG",
                 mode="I",
-                fps=20,
                 codec=codec,
+                fps=extra.get("fps", FPS),
+                # Avoid slow pixel conversions when possible
+                output_params=["-pix_fmt", "yuv420p"] if media_type == "video/mp4" else None,
+                quality=extra.get("quality", None),
             ) as writer:
-                for frame in frames:
-                    writer.append_data(frame)
+                # Stream exploration frames with throttling
+                for i in range(0, explore_len, stride):
+                    writer.append_data(compose(i))
+                # Tail frames to hold the final view
+                for _ in range(TAIL_FRAMES):
+                    writer.append_data(compose(None))
             return target, media_type
-        except Exception as exc:  # pragma: no cover - depends on local ffmpeg codecs
+        except Exception as exc:
             last_error = exc
-            continue
 
-    gif_path = animation_path.with_suffix(".gif")
+    # GIF fallback with strict cap and subsampling
     try:
-        imageio.mimsave(str(gif_path), frames, format="GIF", duration=0.05)
+        gif_path = animation_path.with_suffix(".gif")
+        max_explore_frames = max(0, min(MAX_GIF_FRAMES - TAIL_FRAMES, MAX_GIF_FRAMES))
+        stride = 1 if explore_len <= max_explore_frames else ceil(explore_len / max_explore_frames)
+        frames: List[np.ndarray] = []
+        for i in range(0, explore_len, stride):
+            frames.append(compose(i))
+        for _ in range(TAIL_FRAMES):
+            frames.append(compose(None))
+        # Keep GIF under control
+        imageio.mimsave(str(gif_path), frames, format="GIF", duration=1.0 / FPS)
         return gif_path, "image/gif"
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         if last_error is not None:
             raise RuntimeError("Failed to encode animation with available codecs.") from last_error
         raise RuntimeError("Failed to encode animation and GIF fallback.") from exc
-
 
 def store_result_metadata(result: SolveResult) -> Path:
     """Persist metadata for later retrieval."""
