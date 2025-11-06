@@ -474,19 +474,17 @@ RUN_HTML = """<!doctype html>
 <html>
   <body>
     <h3>Processing</h3>
-    <p>This page streams events. No spinners. Read the log.</p>
-    <img id="frame" src="/image/{jobId}/current.png?ts={ts}" alt="current frame" />
+    <p>This page streams logs live. Please wait.</p>
+    <img id="frame" src="/image/{jobId}/current.png?ts={ts}" alt="Current frame" width="700"/>
     <pre id="log" style="white-space: pre-wrap;"></pre>
-    <div id="links"></div>
+
     <script>
       const jobId = "{jobId}";
       const frameEl = document.getElementById("frame");
       const logEl = document.getElementById("log");
-      const linksEl = document.getElementById("links");
       const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + jobId);
 
       function refreshFrame() {{
-        // Bust cache with timestamp
         frameEl.src = "/image/" + jobId + "/current.png?ts=" + Date.now();
       }}
 
@@ -499,31 +497,11 @@ RUN_HTML = """<!doctype html>
             refreshFrame();
           }} else if (msg.type === "done") {{
             logEl.textContent += "[done]\\n";
-            refreshFrame();
-            linksEl.innerHTML = "";
-            fetch("/status/" + jobId).then(r => r.json()).then(s => {{
-              if (s.summaryPath) {{ 
-                const a = document.createElement("a"); 
-                a.href = "/summary/" + jobId + ".png"; 
-                a.textContent = "Open Summary Image"; 
-                a.target = "_blank"; 
-                linksEl.appendChild(a);
-              }}
-              if (s.videoPath) {{
-                const b = document.createElement("a");
-                b.href = "/video/" + jobId + ".mp4";
-                b.textContent = (linksEl.children.length ? " | " : "") + "Download Video";
-                linksEl.appendChild(document.createTextNode(" "));
-                linksEl.appendChild(b);
-              }}
-              if (s.error) {{
-                const e = document.createElement("div");
-                e.textContent = "Error: " + s.error;
-                linksEl.appendChild(document.createElement("br"));
-                linksEl.appendChild(e);
-              }}
-            }});
             ws.close();
+            // Redirect after 1.5s
+            setTimeout(() => {{
+              window.location.href = "/result/" + jobId;
+            }}, 1500);
           }}
         }} catch(e) {{
           logEl.textContent += "[parse-error] " + e + "\\n";
@@ -534,8 +512,7 @@ RUN_HTML = """<!doctype html>
       ws.onerror = () => {{ logEl.textContent += "WebSocket error.\\n"; }};
       ws.onclose = () => {{ logEl.textContent += "Closed.\\n"; }};
 
-      // Poll frame periodically while running
-      const iv = setInterval(() => {{ refreshFrame(); }}, 1000);
+      setInterval(refreshFrame, 1000);
     </script>
   </body>
 </html>
@@ -690,3 +667,42 @@ async def ws_logs(ws: WebSocket, jobId: str):
                 await ws.close()
             except Exception:
                 pass
+@app.get("/result/{jobId}", response_class=HTMLResponse)
+def result_page(jobId: str):
+    job = JOB_STORE.get(jobId)
+    if not job.done:
+        return HTMLResponse(f"<h3>Job {jobId} still running...</h3>", status_code=202)
+
+    html = f"""<!doctype html>
+<html>
+  <body>
+    <h2>Processing Complete</h2>
+    <h3>Summary Image</h3>
+    <img src="/summary/{jobId}.png" width="700" alt="summary image" />
+
+    <h3>Search Animation</h3>
+    <video width="700" controls autoplay loop>
+      <source src="/video/{jobId}.mp4" type="video/mp4">
+      Your browser does not support the video tag.
+    </video>
+
+    <br><br>
+    <a href="/">← Upload Another Image</a>
+  </body>
+</html>
+"""
+    return HTMLResponse(html)
+
+@app.get("/stream/video/{jobId}")
+def stream_video(jobId: str):
+    job = JOB_STORE.get(jobId)
+    if not job.finalVideoPath or not job.finalVideoPath.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # Serve video properly for browsers (supports seeking)
+    return FileResponse(
+        job.finalVideoPath,
+        media_type="video/mp4",
+        filename=f"{jobId}.mp4",
+        headers={"Accept-Ranges": "bytes"}
+    )
