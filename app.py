@@ -4,11 +4,10 @@ import asyncio
 import heapq
 import io
 import json
-import shutil
+import subprocess
 import threading
 import time
 import uuid
-import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,14 +29,27 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, FileResponse
+from fastapi.responses import (
+    HTMLResponse,
+    PlainTextResponse,
+    StreamingResponse,
+    FileResponse,
+)
+from fastapi.templating import Jinja2Templates
+from fastapi import Request
 from PIL import Image
 
-# ---------------- Types ----------------
+# ---------- Types ----------
 Point = Tuple[int, int]
 
-# ---------------- I/O Helpers ----------------
-def loadImage(path: str, maxDim: int = 900) -> np.ndarray:
+# ---------- Paths / Templates ----------
+ROOT_DIR = Path(__file__).parent.resolve()
+UPLOADS_DIR = ROOT_DIR / "uploads"
+OUTPUT_ROOT = ROOT_DIR
+TEMPLATES = Jinja2Templates(directory=str(ROOT_DIR / "templates"))
+
+# ---------- I/O Helpers ----------
+def LoadImage(path: str, maxDim: int = 900) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     width, height = img.size
     scale = min(maxDim / width, maxDim / height, 1.0)
@@ -49,7 +61,7 @@ def loadImage(path: str, maxDim: int = 900) -> np.ndarray:
             img = img.resize(newSize, Image.LANCZOS)
     return np.array(img)
 
-def computeTreeMask(rgb: np.ndarray, threshold: float = 0.15) -> np.ndarray:
+def ComputeTreeMask(rgb: np.ndarray, threshold: float = 0.15) -> np.ndarray:
     r = rgb[..., 0].astype(np.float32)
     g = rgb[..., 1].astype(np.float32)
     b = rgb[..., 2].astype(np.float32)
@@ -57,17 +69,17 @@ def computeTreeMask(rgb: np.ndarray, threshold: float = 0.15) -> np.ndarray:
     exg = (g - maxRb) / (g + maxRb + 1e-6)
     return (exg > threshold).astype(np.int32)
 
-def buildCostMap(treeMask: np.ndarray, treeCost: int = 20, openCost: int = 1) -> np.ndarray:
+def BuildCostMap(treeMask: np.ndarray, treeCost: int = 20, openCost: int = 1) -> np.ndarray:
     return np.where(treeMask == 1, treeCost, openCost).astype(np.int32)
 
-def ndarrayToPngBytes(arr: np.ndarray) -> bytes:
+def NdarrayToPngBytes(arr: np.ndarray) -> bytes:
     im = Image.fromarray(arr)
     buf = io.BytesIO()
     im.save(buf, format="PNG")
     buf.seek(0)
     return buf.read()
 
-# ---------------- A* Animator ----------------
+# ---------- A* Animator ----------
 class AStarAnimator:
     def __init__(
         self,
@@ -85,7 +97,7 @@ class AStarAnimator:
 
         self.neighbors = [(0, 1), (1, 0), (0, -1), (-1, 0)]
         self.g = {start: 0}
-        self.f = {start: self._heuristic(start, goal)}
+        self.f = {start: self._Heuristic(start, goal)}
         self.parents: dict[Point, Point] = {}
         self.open: List[Tuple[float, Point]] = [(self.f[start], start)]
         self.closed: set[Point] = set()
@@ -107,10 +119,10 @@ class AStarAnimator:
         self.frontierMask = np.zeros(costMap.shape, dtype=bool)
 
     @staticmethod
-    def _heuristic(a: Point, b: Point) -> float:
+    def _Heuristic(a: Point, b: Point) -> float:
         return float(np.hypot(a[0] - b[0], a[1] - b[1]))
 
-    def _advance(self) -> None:
+    def _Advance(self) -> None:
         for _ in range(self.expansionsPerFrame):
             if self.done:
                 return
@@ -144,11 +156,11 @@ class AStarAnimator:
                     if tentative < self.g.get(neighbor, float("inf")):
                         self.parents[neighbor] = current
                         self.g[neighbor] = tentative
-                        self.f[neighbor] = tentative + self._heuristic(neighbor, self.goal)
+                        self.f[neighbor] = tentative + self._Heuristic(neighbor, self.goal)
                         heapq.heappush(self.open, (self.f[neighbor], neighbor))
 
-    def step(self) -> np.ndarray:
-        self._advance()
+    def Step(self) -> np.ndarray:
+        self._Advance()
         np.copyto(self.frameBuffer, self.base)
 
         if self.visitedMask.any():
@@ -175,8 +187,8 @@ class AStarAnimator:
                 self.frameBuffer[py, px] = [255, 0, 0]
         return self.frameBuffer
 
-# ---------------- Summary Plot ----------------
-def plotPathsSummary(anim: AStarAnimator, rgb: np.ndarray, original: np.ndarray, costMap: np.ndarray):
+# ---------- Summary Plot ----------
+def PlotPathsSummary(anim: AStarAnimator, rgb: np.ndarray, original: np.ndarray, costMap: np.ndarray):
     if not anim.path:
         return None
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
@@ -212,7 +224,7 @@ def plotPathsSummary(anim: AStarAnimator, rgb: np.ndarray, original: np.ndarray,
     fig.subplots_adjust(hspace=0.095, wspace=0.062, top=0.945, bottom=0.015, left=0.010, right=0.990)
     return fig
 
-def fallbackStraightPath(start: Point, goal: Point) -> List[Point]:
+def FallbackStraightPath(start: Point, goal: Point) -> List[Point]:
     y0, x0 = start
     y1, x1 = goal
     path: List[Point] = []
@@ -236,24 +248,22 @@ def fallbackStraightPath(start: Point, goal: Point) -> List[Point]:
             y0 += sy
     return path
 
-# ---------------- Video Save (imageio-ffmpeg) ----------------
-
-def save_animation(
+# ---------- Video Save ----------
+def SaveAnimation(
     anim: AStarAnimator,
-    interval_ms: int,
-    output_path: Path,
-    hold_frames: int = 15,
+    intervalMs: int,
+    outputPath: Path,
+    holdFrames: int = 15,
 ) -> Path:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-    fps = max(1, int(round(1000 / interval_ms)))
+    outputPath.parent.mkdir(parents=True, exist_ok=True)
+    ffmpegPath = imageio_ffmpeg.get_ffmpeg_exe()
+    fps = max(1, int(round(1000 / intervalMs)))
     h, w = anim.rgb.shape[:2]
     size = f"{w}x{h}"
 
     process = subprocess.Popen(
         [
-            ffmpeg_path,
+            ffmpegPath,
             "-y",
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
@@ -264,7 +274,7 @@ def save_animation(
             "-an",
             "-vcodec", "libx264",
             "-pix_fmt", "yuv420p",
-            str(output_path),
+            str(outputPath),
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
@@ -272,27 +282,24 @@ def save_animation(
     )
 
     try:
-        # First frame
-        frame = anim.step()
+        frame = anim.Step()
         process.stdin.write(frame.tobytes())
 
-        # Stream frames until done
         while not anim.done:
-            frame = anim.step()
+            frame = anim.Step()
             process.stdin.write(frame.tobytes())
 
-        # Hold last frame
-        for _ in range(hold_frames):
+        for _ in range(holdFrames):
             process.stdin.write(anim.frameBuffer.tobytes())
 
         process.stdin.close()
-        stderr_output = process.stderr.read().decode("utf-8", errors="ignore")
+        stderrOutput = process.stderr.read().decode("utf-8", errors="ignore")
         process.wait()
 
         if process.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed (code {process.returncode}): {stderr_output}")
+            raise RuntimeError(f"ffmpeg failed (code {process.returncode}): {stderrOutput}")
 
-        if not output_path.exists() or output_path.stat().st_size == 0:
+        if not outputPath.exists() or outputPath.stat().st_size == 0:
             raise RuntimeError("ffmpeg wrote no output or empty file")
 
     except Exception as exc:
@@ -309,9 +316,9 @@ def save_animation(
         except Exception:
             pass
 
-    return output_path
+    return outputPath
 
-# ---------------- Job Model ----------------
+# ---------- Job Model ----------
 @dataclass
 class Job:
     jobId: str
@@ -332,26 +339,26 @@ class Job:
     currentFrame: Optional[np.ndarray] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def log(self, msg: str) -> None:
+    def Log(self, msg: str) -> None:
         with self.lock:
             ts = time.strftime("%H:%M:%S")
             self.logs.append(f"[{ts}] {msg}")
 
-# ---------------- Job Store ----------------
+# ---------- Job Store ----------
 class JobStore:
     def __init__(self) -> None:
         self._jobs: Dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def create(self, uploadPath: Path) -> Job:
+    def Create(self, uploadPath: Path) -> Job:
         jobId = uuid.uuid4().hex[:12]
-        outRoot = Path("BestPath-JungleMode") / jobId
+        outRoot = OUTPUT_ROOT / "BestPath-JungleMode" / jobId
         job = Job(jobId=jobId, uploadPath=uploadPath, outputRoot=outRoot)
         with self._lock:
             self._jobs[jobId] = job
         return job
 
-    def get(self, jobId: str) -> Job:
+    def Get(self, jobId: str) -> Job:
         with self._lock:
             if jobId not in self._jobs:
                 raise KeyError("Job not found")
@@ -359,34 +366,33 @@ class JobStore:
 
 JOB_STORE = JobStore()
 
-# ---------------- Processing ----------------
-def runPipeline(job: Job, expansionsPerFrame: int = 25, intervalMs: int = 12) -> None:
+# ---------- Processing ----------
+def RunPipeline(job: Job, expansionsPerFrame: int = 25, intervalMs: int = 12) -> None:
     try:
-        job.log("Loading image")
-        rgb = loadImage(str(job.uploadPath), maxDim=900)
+        job.Log("Loading image")
+        rgb = LoadImage(str(job.uploadPath), maxDim=900)
         job.rgb = rgb
         job.originalRgb = rgb.copy()
         job.currentFrame = rgb.copy()
 
-        job.log("Computing vegetation mask")
-        treeMask = computeTreeMask(rgb, threshold=0.15)
+        job.Log("Computing vegetation mask")
+        treeMask = ComputeTreeMask(rgb, threshold=0.15)
         job.treeMask = treeMask
 
-        job.log("Building traversal cost map")
-        costMap = buildCostMap(treeMask, treeCost=20, openCost=1)
+        job.Log("Building traversal cost map")
+        costMap = BuildCostMap(treeMask, treeCost=20, openCost=1)
         job.costMap = costMap
 
         if job.start is None or job.goal is None:
             job.error = "Start and Goal not set"
-            job.log("Error: start and goal not set")
+            job.Log("Error: start and goal not set")
             job.done = True
             return
 
-        job.log(f"Starting A* search from {job.start} to {job.goal}")
+        job.Log(f"Starting A* search from {job.start} to {job.goal}")
         animator = AStarAnimator(rgb, costMap, job.start, job.goal, expansionsPerFrame=expansionsPerFrame)
         job.animator = animator
 
-        # Save animation via imageio-ffmpeg
         videoDir = job.outputRoot / "video"
         imageDir = job.outputRoot / "image"
         videoDir.mkdir(parents=True, exist_ok=True)
@@ -394,198 +400,73 @@ def runPipeline(job: Job, expansionsPerFrame: int = 25, intervalMs: int = 12) ->
         videoPath = videoDir / "search_animation.mp4"
 
         try:
-            job.log("Writing video with imageio-ffmpeg")
-            final_path = save_animation(animator, interval_ms=intervalMs, output_path=videoPath, hold_frames=15)
-            job.finalVideoPath = final_path
-            job.log(f"Video saved: {final_path}")
+            job.Log("Writing video with imageio-ffmpeg")
+            finalPath = SaveAnimation(animator, intervalMs=intervalMs, outputPath=videoPath, holdFrames=15)
+            job.finalVideoPath = finalPath
+            job.Log(f"Video saved: {finalPath}")
         except Exception as exc:
-            job.log(f"Video export failed: {exc}")
-            # Still advance to completion to produce summary
+            job.Log(f"Video export failed: {exc}")
             while not animator.done:
-                frame = animator.step()
+                frame = animator.Step()
                 job.currentFrame = frame.copy()
 
-        # Update current frame at the end
         if animator.done:
             job.currentFrame = animator.frameBuffer.copy()
 
         if animator.path:
             treesCrossed = int(np.sum(treeMask[tuple(np.array(animator.path).T)]))
-            job.log(f"Path length: {len(animator.path)}")
-            job.log(f"Estimated trees crossed: {treesCrossed}")
+            job.Log(f"Path length: {len(animator.path)}")
+            job.Log(f"Estimated trees crossed: {treesCrossed}")
 
-            job.log("Creating summary figure")
-            fig2 = plotPathsSummary(animator, animator.base, job.originalRgb, costMap)
+            job.Log("Creating summary figure")
+            fig2 = PlotPathsSummary(animator, animator.base, job.originalRgb, costMap)
             if fig2 is not None:
                 summaryPath = job.outputRoot / "image" / "best_path_summary.png"
                 fig2.savefig(summaryPath, bbox_inches="tight", dpi=160)
                 plt.close(fig2)
                 job.summaryImagePath = summaryPath
-                job.log(f"Summary saved: {summaryPath}")
+                job.Log(f"Summary saved: {summaryPath}")
         else:
-            job.log("No viable path found. Generating straight-line fallback")
-            direct = fallbackStraightPath(job.start, job.goal)
+            job.Log("No viable path found. Generating straight-line fallback")
+            direct = FallbackStraightPath(job.start, job.goal)
             treesCrossed = int(np.sum(treeMask[tuple(np.array(direct).T)]))
-            job.log(f"Direct path length: {len(direct)}")
-            job.log(f"Estimated trees encountered on direct path: {treesCrossed}")
+            job.Log(f"Direct path length: {len(direct)}")
+            job.Log(f"Estimated trees encountered on direct path: {treesCrossed}")
 
         job.done = True
-        job.log("Processing complete")
+        job.Log("Processing complete")
     except Exception as exc:
         job.error = str(exc)
         job.done = True
-        job.log(f"Fatal error: {exc}")
+        job.Log(f"Fatal error: {exc}")
 
-# ---------------- FastAPI App ----------------
+# ---------- FastAPI App ----------
 app = FastAPI(title="Jungle Path A* — Minimal UI")
 
-INDEX_HTML = """<!doctype html>
-<html>
-  <body>
-    <h2>Upload Image</h2>
-    <form action="/upload" method="post" enctype="multipart/form-data">
-      <input type="file" name="image" accept="image/*" required>
-      <button type="submit">Upload</button>
-    </form>
-  </body>
-</html>
-"""
-
-
-SELECT_POINTS_HTML = """<!doctype html>
-<html>
-  <body>
-    <h3>Select Start then Goal</h3>
-    <p>Click once for Start (magenta), then once for Goal (yellow). Coordinates shown below.</p>
-    <canvas id="cnv"></canvas>
-    <div id="coords">Start: -, Goal: -</div>
-    <form id="goForm" method="post" action="/start">
-      <input type="hidden" name="jobId" value="{jobId}">
-      <input type="hidden" name="startY" id="startY">
-      <input type="hidden" name="startX" id="startX">
-      <input type="hidden" name="goalY" id="goalY">
-      <input type="hidden" name="goalX" id="goalX">
-      <label>Expansions per frame: <input type="number" name="expansionsPerFrame" value="25" min="1" max="200"></label>
-      <button type="submit">Run</button>
-    </form>
-    <script>
-      const jobId = "{jobId}";
-      const imgUrl = "/image/" + jobId + "/base.png";
-      const cnv = document.getElementById("cnv");
-      const ctx = cnv.getContext("2d");
-      const coordsDiv = document.getElementById("coords");
-      const startY = document.getElementById("startY");
-      const startX = document.getElementById("startX");
-      const goalY = document.getElementById("goalY");
-      const goalX = document.getElementById("goalX");
-      let clicks = [];
-      const img = new Image();
-      img.onload = () => {{ cnv.width = img.width; cnv.height = img.height; ctx.drawImage(img,0,0); }};
-      img.src = imgUrl;
-
-      function drawMarkers() {{
-        ctx.drawImage(img,0,0);
-        if (clicks[0]) {{
-          ctx.fillStyle = "magenta";
-          ctx.fillRect(clicks[0].x-2, clicks[0].y-2, 5, 5);
-        }}
-        if (clicks[1]) {{
-          ctx.fillStyle = "yellow";
-          ctx.fillRect(clicks[1].x-2, clicks[1].y-2, 5, 5);
-        }}
-      }}
-      cnv.addEventListener("click", (e) => {{
-        const rect = cnv.getBoundingClientRect();
-        const x = Math.round(e.clientX - rect.left);
-        const y = Math.round(e.clientY - rect.top);
-        if (clicks.length < 2) {{ clicks.push({{x, y}}); }} else {{ clicks = [{{x, y}}]; }}
-        drawMarkers();
-        if (clicks[0]) {{ startY.value = clicks[0].y; startX.value = clicks[0].x; }}
-        if (clicks[1]) {{ goalY.value = clicks[1].y; goalX.value = clicks[1].x; }}
-        coordsDiv.textContent = "Start: " + (clicks[0] ? clicks[0].y + "," + clicks[0].x : "-") +
-                                " | Goal: " + (clicks[1] ? clicks[1].y + "," + clicks[1].x : "-");
-      }});
-    </script>
-  </body>
-</html>
-"""
-
-
-RUN_HTML = """<!doctype html>
-<html>
-  <body>
-    <h3>Processing</h3>
-    <p>This page streams logs live. Please wait.</p>
-    <img id="frame" src="/image/{jobId}/current.png?ts={ts}" alt="Current frame" width="700"/>
-    <pre id="log" style="white-space: pre-wrap;"></pre>
-
-    <script>
-      const jobId = "{jobId}";
-      const frameEl = document.getElementById("frame");
-      const logEl = document.getElementById("log");
-      const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + jobId);
-
-      function refreshFrame() {{
-        frameEl.src = "/image/" + jobId + "/current.png?ts=" + Date.now();
-      }}
-
-      ws.onmessage = (ev) => {{
-        try {{
-          const msg = JSON.parse(ev.data);
-          if (msg.type === "log") {{
-            logEl.textContent += msg.msg + "\\n";
-          }} else if (msg.type === "frame") {{
-            refreshFrame();
-          }} else if (msg.type === "done") {{
-            logEl.textContent += "[done]\\n";
-            ws.close();
-            setTimeout(() => {{
-              window.location.href = "/result/" + jobId;
-            }}, 1500);
-          }}
-        }} catch(e) {{
-          logEl.textContent += "[parse-error] " + e + "\\n";
-        }}
-      }};
-
-      ws.onopen = () => {{ logEl.textContent += "Connected. Streaming logs...\\n"; }};
-      ws.onerror = () => {{ logEl.textContent += "WebSocket error.\\n"; }};
-      ws.onclose = () => {{ logEl.textContent += "Closed.\\n"; }};
-
-      setInterval(refreshFrame, 1000);
-    </script>
-  </body>
-</html>
-"""
-
-
-# ---------------- Routes ----------------
-app = FastAPI(title="Jungle Path A* — Minimal UI")
-
+# ---------- Pages ----------
 @app.get("/", response_class=HTMLResponse)
-def index():
-    return INDEX_HTML
+def Index(request: Request):
+    return TEMPLATES.TemplateResponse("index.html", {"request": request})
 
 @app.post("/upload", response_class=HTMLResponse)
-async def upload(image: UploadFile = File(...)):
+async def Upload(request: Request, image: UploadFile = File(...)):
     if not image.filename:
         raise HTTPException(status_code=400, detail="No file")
     suffix = Path(image.filename).suffix.lower()
     if suffix not in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}:
         raise HTTPException(status_code=400, detail="Unsupported format")
-    uploadsDir = Path("uploads")
-    uploadsDir.mkdir(parents=True, exist_ok=True)
-    dst = uploadsDir / f"{uuid.uuid4().hex}{suffix}"
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    dst = UPLOADS_DIR / f"{uuid.uuid4().hex}{suffix}"
     data = await image.read()
     dst.write_bytes(data)
 
-    job = JOB_STORE.create(dst)
+    job = JOB_STORE.Create(dst)
     try:
-        rgb = loadImage(str(dst), maxDim=900)
+        rgb = LoadImage(str(dst), maxDim=900)
         job.rgb = rgb
         job.originalRgb = rgb.copy()
         job.currentFrame = rgb.copy()
-        basePng = ndarrayToPngBytes(rgb)
+        basePng = NdarrayToPngBytes(rgb)
         baseDir = job.outputRoot / "image"
         baseDir.mkdir(parents=True, exist_ok=True)
         (baseDir / "base.png").write_bytes(basePng)
@@ -593,28 +474,28 @@ async def upload(image: UploadFile = File(...)):
         job.error = str(exc)
         return PlainTextResponse(f"Image load failed: {exc}", status_code=500)
 
-    html = SELECT_POINTS_HTML.format(jobId=job.jobId)
-    return HTMLResponse(html)
+    return TEMPLATES.TemplateResponse("selectPoint.html", {"request": request, "jobId": job.jobId})
 
 @app.get("/image/{jobId}/base.png")
-def get_base(jobId: str):
-    job = JOB_STORE.get(jobId)
+def GetBase(jobId: str):
+    job = JOB_STORE.Get(jobId)
     if job.rgb is None:
         raise HTTPException(status_code=404, detail="Base not ready")
-    png = ndarrayToPngBytes(job.rgb)
+    png = NdarrayToPngBytes(job.rgb)
     return StreamingResponse(io.BytesIO(png), media_type="image/png")
 
 @app.get("/image/{jobId}/current.png")
-def get_current(jobId: str):
-    job = JOB_STORE.get(jobId)
+def GetCurrent(jobId: str):
+    job = JOB_STORE.Get(jobId)
     arr = job.currentFrame if job.currentFrame is not None else job.rgb
     if arr is None:
         raise HTTPException(status_code=404, detail="No frame")
-    png = ndarrayToPngBytes(arr)
+    png = NdarrayToPngBytes(arr)
     return StreamingResponse(io.BytesIO(png), media_type="image/png")
 
 @app.post("/start", response_class=HTMLResponse)
-def start(
+def Start(
+    request: Request,
     backgroundTasks: BackgroundTasks,
     jobId: str = Form(...),
     startY: int = Form(...),
@@ -623,7 +504,7 @@ def start(
     goalX: int = Form(...),
     expansionsPerFrame: int = Form(25),
 ):
-    job = JOB_STORE.get(jobId)
+    job = JOB_STORE.Get(jobId)
     if job.rgb is None:
         raise HTTPException(status_code=400, detail="Image not loaded")
     h, w = job.rgb.shape[0], job.rgb.shape[1]
@@ -633,16 +514,23 @@ def start(
     gX = max(0, min(int(goalX), w - 1))
     job.start = (sY, sX)
     job.goal = (gY, gX)
-    job.log(f"Start set to {job.start}")
-    job.log(f"Goal set to {job.goal}")
-    job.log(f"Expansions per frame: {expansionsPerFrame}")
+    job.Log(f"Start set to {job.start}")
+    job.Log(f"Goal set to {job.goal}")
+    job.Log(f"Expansions per frame: {expansionsPerFrame}")
 
-    backgroundTasks.add_task(runPipeline, job, expansionsPerFrame, 12)
-    return HTMLResponse(RUN_HTML.format(jobId=jobId, ts=int(time.time() * 1000)))
+    backgroundTasks.add_task(RunPipeline, job, expansionsPerFrame, 12)
+    return TEMPLATES.TemplateResponse(
+        "run.html",
+        {
+            "request": request,
+            "jobId": jobId,
+            "ts": int(time.time() * 1000),
+        },
+    )
 
 @app.get("/status/{jobId}")
-def status(jobId: str):
-    job = JOB_STORE.get(jobId)
+def Status(jobId: str):
+    job = JOB_STORE.Get(jobId)
     return {
         "done": job.done,
         "error": job.error,
@@ -651,22 +539,22 @@ def status(jobId: str):
     }
 
 @app.get("/summary/{jobId}.png")
-def get_summary(jobId: str):
-    job = JOB_STORE.get(jobId)
+def GetSummary(jobId: str):
+    job = JOB_STORE.Get(jobId)
     if not job.summaryImagePath or not job.summaryImagePath.exists():
         raise HTTPException(status_code=404, detail="Summary not available")
     return FileResponse(job.summaryImagePath, media_type="image/png")
 
 @app.get("/video/{jobId}.mp4")
-def get_video_legacy(jobId: str):
-    job = JOB_STORE.get(jobId)
+def GetVideoLegacy(jobId: str):
+    job = JOB_STORE.Get(jobId)
     if not job.finalVideoPath or not job.finalVideoPath.exists():
         raise HTTPException(status_code=404, detail="Video not available")
     return FileResponse(job.finalVideoPath, media_type="video/mp4", filename="search_animation.mp4")
 
 @app.get("/stream/video/{jobId}")
-def stream_video(jobId: str):
-    job = JOB_STORE.get(jobId)
+def StreamVideo(jobId: str):
+    job = JOB_STORE.Get(jobId)
     if not job.finalVideoPath or not job.finalVideoPath.exists():
         raise HTTPException(status_code=404, detail="Video not found")
     return FileResponse(
@@ -676,12 +564,13 @@ def stream_video(jobId: str):
         headers={"Accept-Ranges": "bytes"},
     )
 
-# ---------------- WebSocket Log Stream ----------------
+# ---------- WebSocket ----------
 @app.websocket("/ws/{jobId}")
-async def ws_logs(ws: WebSocket, jobId: str):
+
+async def WsLogs(ws: WebSocket, jobId: str):
     await ws.accept()
     try:
-        job = JOB_STORE.get(jobId)
+        job = JOB_STORE.Get(jobId)
     except KeyError:
         await ws.send_text(json.dumps({"type": "log", "msg": "Job not found"}))
         await ws.close()
@@ -716,27 +605,22 @@ async def ws_logs(ws: WebSocket, jobId: str):
             except Exception:
                 pass
 
-# ---------------- Result Page ----------------
+# ---------- Result Page ----------
 @app.get("/result/{jobId}", response_class=HTMLResponse)
-def result_page(jobId: str):
-    job = JOB_STORE.get(jobId)
+def ResultPage(request: Request, jobId: str):
+    job = JOB_STORE.Get(jobId)
     if not job.done:
         return HTMLResponse(f"<h3>Job {jobId} still running...</h3>", status_code=202)
 
-    summary_available = job.summaryImagePath and job.summaryImagePath.exists()
-    video_available = job.finalVideoPath and job.finalVideoPath.exists()
+    summaryAvailable = job.summaryImagePath and job.summaryImagePath.exists()
+    videoAvailable = job.finalVideoPath and job.finalVideoPath.exists()
 
-    html = f"""<!doctype html>
-<html>
-  <body>
-    <h2>Processing Complete</h2>
-
-    {'<h3>Summary Image</h3><img src="/summary/' + jobId + '.png" width="720" alt="Summary">' if summary_available else '<p>No summary image available.</p>'}
-
-    {'<h3>Search Animation</h3><video width="720" controls autoplay loop><source src="/stream/video/' + jobId + '" type="video/mp4">Your browser does not support the video tag.</video>' if video_available else '<p>No video available.</p>'}
-
-    <br><br>
-    <a href="/">← Upload Another Image</a>
-  </body>
-</html>"""
-    return HTMLResponse(html)
+    return TEMPLATES.TemplateResponse(
+        "result.html",
+        {
+            "request": request,
+            "jobId": jobId,
+            "summaryAvailable": bool(summaryAvailable),
+            "videoAvailable": bool(videoAvailable),
+        },
+    )
